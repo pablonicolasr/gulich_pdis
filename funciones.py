@@ -335,3 +335,51 @@ def raster_to_vector(img_name, value_field='value', output=None):
             gdf.to_file(output, index=False)
 
         return gdf
+
+
+def porcentaje_area_por_clase(clasif_vector, codigo_clase, poligonos, id_col='link', clase_col='value'):
+    """
+    Calcula el porcentaje de área que una clase ocupa en cada polígono de entrada.
+
+    Parámetros:
+    -----------
+    clasif_vector : GeoDataFrame
+        Capa vectorial clasificada con una columna que identifica clases (por ejemplo: 'value').
+
+    codigo_clase : int
+        Código de la clase a analizar (ej: 4 para construido, 3 para bosque, etc).
+
+    poligonos : GeoDataFrame
+        Capa vectorial sobre la cual calcular el porcentaje de cobertura.
+
+    id_col : str, default='link'
+        Columna de identificación única del polígono (por ejemplo: ID o código de radio censal).
+
+    clase_col : str, default='value'
+        Columna de clase dentro de la clasificación vectorial.
+
+    Retorna:
+    --------
+    GeoDataFrame con columna nueva: 'area_m2' y 'pct_area_clase'.
+    """
+
+    if clasif_vector.crs != poligonos.crs:
+        poligonos = poligonos.to_crs(clasif_vector.crs)
+
+    clase = clasif_vector[clasif_vector[clase_col] == codigo_clase]
+
+    inter = gpd.overlay(poligonos, clase, how='intersection')
+
+    inter['area_interseccion'] = inter.geometry.area
+
+    poligonos['area_total'] = poligonos.geometry.area
+    
+    area_por_id = inter.groupby(id_col)['area_interseccion'].sum().reset_index()
+
+    result = poligonos.merge(area_por_id, on=id_col, how='left')
+
+    result['area_interseccion'] = result['area_interseccion'].fillna(0)
+    
+    result['pct_area_clase'] = (result['area_interseccion'] / result['area_total']) * 100
+
+    return result
