@@ -9,6 +9,10 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from osgeo import gdal
 import rasterio
+from rasterio.features import shapes
+from shapely.geometry import Polygon
+from shapely.geometry import shape
+import geopandas as gpd
 
 def raiz(a, b=2):
     '''
@@ -290,3 +294,44 @@ def guardar_GTiff(fn,crs,transform,a,nodata = 0, dtype = np.float32):
             else:
                 for b in range(0,count):
                     dst.write(a[b].astype(dtype), b+1)
+                    
+
+def raster_to_vector(img_name, value_field='value', output=None):
+    """
+    Convierte un raster a un GeoDataFrame vectorial.
+
+    Parámetros:
+    - img_name: ruta del raster de entrada.
+    - value_field: nombre del campo para los valores del raster.
+    - output: (opcional) ruta del archivo vectorial a guardar (.shp, .geojson, .gpkg...).
+
+    Retorna:
+    - gdf: GeoDataFrame con las geometrías vectorizadas.
+    """
+    
+    with rasterio.open(img_name) as img:
+    
+        metadata = img.meta
+        
+        transform = metadata['transform']
+        
+        crs = metadata['crs']
+        
+        nodata = img.nodata
+        
+        array = img.read(1)
+
+        mask = array != nodata if nodata is not None else None
+
+        features = list(shapes(array, mask=mask, transform=transform))
+        geoms = [shape(geom) for geom, val in features]
+        values = [val for geom, val in features]
+
+        gdf = gpd.GeoDataFrame({value_field: values}, geometry=geoms)
+        gdf.set_crs(crs, inplace=True)
+
+        if output:
+        
+            gdf.to_file(output, index=False)
+
+        return gdf
