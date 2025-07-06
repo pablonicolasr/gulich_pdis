@@ -8,6 +8,7 @@ import numpy as np
 from datetime import datetime
 import matplotlib.pyplot as plt
 from osgeo import gdal
+import rasterio
 
 def raiz(a, b=2):
     '''
@@ -237,3 +238,55 @@ def write_raster_gdal(a, path, fname, fdriver, dtype, gt, src):
     out_image.SetProjection(src)
     
     del out_image
+    
+   
+def nequalize(array, p=2, nodata=None):
+    """
+    Esta función es similar a scale, solo que funciona tanto para matrices de 2 y 3 dimensiones.
+    En el caso de 3 dimensiones, devuelve una matriz con la estructura (banda, fila, columna) para
+    utilizarla en show() de Rasterio.
+    """
+    if len(array.shape)==2:
+    
+        vmin,vmax=np.percentile(array[array!=nodata],(p,100-p))
+        
+        eq_array = (array-vmin)/(vmax-vmin)
+        
+        eq_array = np.clip(eq_array,0,1)
+        
+    elif len(array.shape)==3:
+    
+        eq_array = np.empty_like(array, dtype=float)
+        
+        for i in range(array.shape[0]):
+        
+            eq_array[i]=nequalize(array[i], p=p, nodata=nodata)
+            
+    return eq_array
+    
+
+def guardar_GTiff(fn,crs,transform,a,nodata = 0, dtype = np.float32):
+
+        if len(a.shape)==2:
+        
+            count=1
+            
+        else:
+            count=a.shape[0]
+            
+        with rasterio.open(
+        fn,
+        'w',
+        driver='GTiff',
+        height=a.shape[-2],
+        width=a.shape[-1],
+        count=count,
+        dtype=dtype,
+        nodata = nodata,
+        crs=crs,
+        transform=transform) as dst:
+            if len(a.shape)==2:
+                dst.write(a.astype(dtype), 1)
+            else:
+                for b in range(0,count):
+                    dst.write(a[b].astype(dtype), b+1)
