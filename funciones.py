@@ -4,11 +4,18 @@
 # Created By  : Pablo Ramos
 # Created Date: 04/07/2025
 import re
-import numpy as np
+import os
 from datetime import datetime
+
+from zipfile import ZipFile
+
+import numpy as np
 import matplotlib.pyplot as plt
+
 from osgeo import gdal
 import rasterio
+from rasterio.mask import mask
+from rasterio.plot import show
 from rasterio.features import shapes
 from shapely.geometry import Polygon
 from shapely.geometry import shape
@@ -383,3 +390,160 @@ def porcentaje_area_por_clase(clasif_vector, codigo_clase, poligonos, id_col='li
     result['pct_area_clase'] = (result['area_interseccion'] / result['area_total']) * 100
 
     return result
+    
+
+def compute_mbb(fn, snap_to_grid=True, grid_step=10):
+    """
+    Dado archivo vectorial (shp, geojson, etc), calcula el
+    mínimo rectángulo (Minimum bounding box MBB) que contenga 
+    su primer geometría, usando vértices en una grilla de paso dado
+    
+    Params:
+        fn: Ruta al archivo vectorial (Shapefile, GeoJSON, etc.)
+        snap_to_grid: Si True, ajusta las coordenadas a una grilla
+        grid_step: Paso de la grilla para el ajuste
+    
+    return:
+        Objeto Polygon con el rectángulo mínimo que contiene la primer
+        geometría
+    
+    """
+
+    # Cargar el archivo
+    gdf = gpd.read_file(fn)
+    
+    # Verificar que haya al menos una geometría en el archivo
+    if gdf.empty:
+        raise ValueError("El archivo no contiene geometrías válidas.")
+    
+    first_geom = gdf.geometry.iloc[0] # Seleccionar la primera geometría válida    
+    # first_geom = gdf.iloc[0]['geometry'] #miro solo la primer geometría del archivo
+
+    mX, mY, MX, MY = first_geom.bounds
+    
+    if snap_to_grid:
+        mX = grid_step * np.floor(mX / grid_step)
+        MX = grid_step * np.ceil(MX / grid_step)
+        mY = grid_step * np.floor(mY / grid_step)
+        MY = grid_step * np.ceil(MY / grid_step)
+
+    mbb = shape({
+                 'type': 'Polygon',
+                 'coordinates': [[(mX, MY),
+                                  (MX, MY),
+                                  (MX, mY),
+                                  (mX, mY),
+                                  (mX, MY)]]
+                })
+    return mbb
+    
+
+def extract_10m_bands_Sentinel2_ZIP(zipfilename, mbb=None, compute_ndvi=True, verbose=True):
+    """
+    Dado un archivo zip con las bandas de una imagen Sentinel 2, extrae las 4 bandas de 10m 
+    de resolución (2, 3, 4 y 8) y calcula el NDVI. Si se pasa un polígono mbb en formato GeoJSON,
+    recorta la imagen según dicho polígono, de lo contrario extrae la imagen completa.
+    
+    Parámetros:
+        zipfilename: Ruta al archivo zip que contiene las bandas de la imagen Sentinel 2.
+        mbb: Polígono en formato GeoJSON para recortar la imagen (opcional).
+        compute_ndvi: Booleano para calcular el NDVI (opcional, por defecto True).
+        verbose: Booleano para imprimir información adicional (opcional, por defecto True).
+    
+    Devuelve:
+        np.ndarray: Matriz con las bandas extraídas (incluyendo NDVI si se calcula).
+        crs: Sistema de referencia de coordenadas de la imagen.
+        out_transform: Transformación geoespacial de la imagen.
+    """
+        
+    # vsizip bugfix
+    os.environ['CPL_ZIP_ENCODING'] = 'UTF-8'
+
+    band_names = ['B02', 'B03', 'B04', 'B08']
+    
+    if verbose: print(f'Leyendo ZIP {zipfilename}')
+
+    bands = []
+    crs = None
+    out_transform = None
+    idx = {}
+    
+    with ZipFile(zipfilename,'r') as zfile:
+        for pos, b in enumerate(band_names):
+            fn = [i for i in zfile.namelist() if i.endswith(f'{b}.jp2')]
+            
+            # Nos aseguramos que el archivo exista, de lo contrario generamos un error
+            # de tipo FileNotFoundError
+            if not fn:
+                raise FileNotFoundError(f"Banda {b} no encontrada en {os.path.basename(zipfilename)}.")
+
+            idx[b.rstrip('.')] = pos 
+            
+            fn = f'/vsizip/{os.path.join(zipfilename, fn[0])}'
+            if verbose: print(f'Leyendo {os.path.basename(fn)}')
+    
+            with rasterio.open(fn) as src:
+                subband_crs = src.crs  # recuerdo el sistema de referencia para poder grabar
+    
+                if mbb:  # si hay mbb hago un clip
+                    array, subband_transform = mask(src, [mbb], crop=True)
+                else:  # si no, uso la imagen entera
+                    array = src.read()
+                    subband_transform = src.transform
+    
+
+            # Asegurarse de que crs y transform estén definidos (deben ser los mismos para todas las bandas)
+            # En caso que estemos leyendo bandas con diferente resolución o crs, esto deberá generar un error
+            # de tipo Value Error
+        
+            if crs is None:
+                crs, out_transform = subband_crs, subband_transform
+            elif crs != subband_crs or not np.array_equal(out_transform, subband_transform):
+                raise ValueError(f"La banda {b} tiene diferente CRS o transformaciones.")
+        
+            # Normalizar la banda
+            bands.append(np.float32(array[0]) / 10000)
+    
+    if compute_ndvi:
+        if verbose: print(f"Calculando NDVI.")
+        ndvi = (bands[idx['B08']] - bands[idx['B04']]) / (bands[idx['B08']] + bands[idx['B04']])
+        bands.append(ndvi)
+        
+    return np.stack(bands), crs, out_transform
+    
+
+def guardar_GTiff_vF(fn, crs, transform, mat, meta=None, nodata=None, bandnames=[]):
+    if len(mat.shape)==2:
+        count=1
+    else:
+        count=mat.shape[0]
+
+    if not meta:
+        meta = {}
+
+    meta['driver'] = 'GTiff'
+    meta['height'] = mat.shape[-2]
+    meta['width'] = mat.shape[-1]
+    meta['count'] = count
+    meta['crs'] = crs
+    meta['transform'] = transform
+
+    if 'dtype' not in meta:  # if no datatype is specified, use float32
+        meta['dtype'] = np.float32
+    
+
+    if nodata==None:
+        pass
+    else:
+        meta['nodata'] = nodata
+
+    with rasterio.open(fn, 'w', **meta) as dst:
+        if count==1:  # es una matriz bidimensional, la guardo
+            dst.write(mat.astype(meta['dtype']), 1)
+            if bandnames:
+                dst.set_band_description(1, bandnames[0])
+        else:  # es una matriz tridimensional, guardo cada banda
+            for b in range(count):
+                dst.write(mat[b].astype(meta['dtype']), b+1)
+            for b,bandname in enumerate(bandnames):
+                dst.set_band_description(b+1, bandname)
