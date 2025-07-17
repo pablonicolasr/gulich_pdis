@@ -10,6 +10,12 @@ out/
 proc/
 func/
 images/
+imagenes/
+*.zip
+*.geojson
+*.tiff
+*.tiff
+func/
 
 
 # Distribution / packaging
